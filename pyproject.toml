@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "quantum-nested-sampling"
+version = "0.1.0"
+description = "Quantum Nested Sampling — Publication‑grade Benchmark Suite"
+authors = ["ChatGPT‑o3 <author@example.com>"]
+license = "CC-BY-4.0"
+readme = "README.md"
+packages = [{include = "quantum_nested_sampling_publication.py"}]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+numpy = "^1.20.0"
+scipy = "^1.7.0"
+matplotlib = "^3.4.0"
+tqdm = "^4.60.0"
+qiskit = {version = "^1.0.0", optional = true}
+qiskit-aer = "^0.17.1"
+qiskit-algorithms = "^0.3.1"
+
+[tool.poetry.extras]
+quantum = ["qiskit"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+quantum-ns = "quantum_nested_sampling_publication:main"

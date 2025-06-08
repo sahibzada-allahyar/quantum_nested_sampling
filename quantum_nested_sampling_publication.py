@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import math
 import os
 import random
@@ -41,20 +42,34 @@ import numpy.linalg as npl
 import scipy.stats as sps
 from tqdm.auto import tqdm
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('quantum_nested_sampling.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # --- Optional imports (quantum stack).  Wrapped in try/except so that the
 # --- classical part still runs on machines without Qiskit.
 try:
-    from qiskit import Aer, QuantumCircuit, execute
-    from qiskit.algorithms import Grover
+    from qiskit import QuantumCircuit
+    from qiskit_aer import Aer
+    from qiskit_algorithms import Grover
     from qiskit.circuit.library import PhaseOracle
-    from qiskit.algorithms.amplitude_estimators import (
+    from qiskit_algorithms.amplitude_estimators import (
         IterativeAmplitudeEstimation,
         EstimationProblem,
     )
 
     _HAS_QISKIT = True
-except ImportError:
+    logger.info("Qiskit successfully imported with updated API")
+except ImportError as e:
     _HAS_QISKIT = False
+    logger.warning(f"Qiskit import failed: {e}")
 
 ###############################################################################
 # 1.  PROBLEMS — Likelihood families with analytic evidences                  #
@@ -134,12 +149,14 @@ def classical_nested_sampling(
 ):
     """Return (lnZ, n_like_calls, runtime_s)."""
 
+    logger.info(f"Starting classical nested sampling with n_live={n_live}, seed={rng_seed}")
     rng = np.random.default_rng(rng_seed)
     start = time.perf_counter()
 
     live = prior_sampler(n_live)
     live_lnL = np.array([lnL(t) for t in live])
     n_like = n_live
+    logger.info(f"Initialized {n_live} live points")
 
     lnZ = -np.inf
     X_prev = 1.0
@@ -151,13 +168,17 @@ def classical_nested_sampling(
         ln_weight = math.log(X_prev - X_i) + L_i
         lnZ_new = np.logaddexp(lnZ, ln_weight)
 
+        if i % 1000 == 0 or i <= 10:
+            logger.info(f"Classical NS iteration {i}: lnZ={lnZ_new:.4f}, n_like={n_like}")
+
         if lnZ_new - lnZ < stop_delta_lnZ:
             lnZ = lnZ_new
+            logger.info(f"Classical NS converged at iteration {i}")
             break
         lnZ = lnZ_new
 
         # replace worst point with new prior draw > L_i
-        # naive rejection sampling — for fairness we count each rejected draw
+        # naive rejection sampling — for fairness we count each rejected draw
         while True:
             theta = prior_sampler(1)[0]
             val = lnL(theta)
@@ -169,6 +190,7 @@ def classical_nested_sampling(
         X_prev = X_i
 
     runtime = time.perf_counter() - start
+    logger.info(f"Classical NS completed: lnZ={lnZ:.4f}, n_like={n_like}, runtime={runtime:.2f}s")
     return lnZ, n_like, runtime
 
 
@@ -205,9 +227,21 @@ if _HAS_QISKIT:
 
         grover = Grover(oracle=oracle)
         backend = backend or Aer.get_backend('aer_simulator_statevector')
-        result = grover.run(backend, shots=1)
-        idx = int(result.assignment, 2)
-        return candidates[idx], result.circuit_info['oracle_calls']
+        
+        # Use the sampler interface for the newer API
+        from qiskit.primitives import Sampler
+        sampler = Sampler()
+        result = grover.run(sampler)
+        
+        # Extract the most likely outcome
+        counts = result.quasi_dists[0]
+        best_measurement = max(counts, key=counts.get)
+        idx = int(best_measurement)
+        
+        # Oracle calls are approximated (Grover's algorithm uses sqrt(N) calls)
+        oracle_calls = int(math.sqrt(n_candidates))
+        
+        return candidates[idx], oracle_calls
 
     # --- Amplitude Estimation wrapper for lnL when decomposed as sum of M terms
     def quantum_sum(values: List[float], *, epsilon_target: float = 1e-3) -> float:
@@ -249,6 +283,7 @@ if _HAS_QISKIT:
         stop_delta_lnZ: float = 1e-4,
         rng_seed: int = 0,
     ):
+        logger.info(f"Starting quantum nested sampling with n_live={n_live}, n_candidates={n_candidates}, seed={rng_seed}")
         rng = np.random.default_rng(rng_seed)
         start = time.perf_counter()
 
@@ -256,6 +291,7 @@ if _HAS_QISKIT:
         live_lnL = np.array([lnL(t) for t in live])
         n_like = n_live
         n_oracle = 0  # quantum oracle calls (Grover)
+        logger.info(f"Initialized {n_live} live points for quantum NS")
 
         lnZ = -np.inf
         X_prev = 1.0
@@ -268,8 +304,13 @@ if _HAS_QISKIT:
             X_i = math.exp(-i / n_live)
             ln_weight = math.log(X_prev - X_i) + L_i
             lnZ_new = np.logaddexp(lnZ, ln_weight)
+            
+            if i % 1000 == 0 or i <= 10:
+                logger.info(f"Quantum NS iteration {i}: lnZ={lnZ_new:.4f}, n_like={n_like}, n_oracle={n_oracle}")
+            
             if lnZ_new - lnZ < stop_delta_lnZ:
                 lnZ = lnZ_new
+                logger.info(f"Quantum NS converged at iteration {i}")
                 break
             lnZ = lnZ_new
 
@@ -288,6 +329,7 @@ if _HAS_QISKIT:
             X_prev = X_i
 
         runtime = time.perf_counter() - start
+        logger.info(f"Quantum NS completed: lnZ={lnZ:.4f}, n_like={n_like}, n_oracle={n_oracle}, runtime={runtime:.2f}s")
         return lnZ, n_like, n_oracle, runtime
 
 ###############################################################################
@@ -320,16 +362,25 @@ def run_suite(
     n_live_list=(100, 200, 400),
     n_repeats: int = 5,
 ):
-    print("Running benchmark suite …")
+    logger.info("Running benchmark suite …")
+    total_experiments = len(dims) * len(n_live_list) * n_repeats
+    current_exp = 0
 
     for dim in dims:
+        logger.info(f"Starting experiments for dimension {dim}")
         problem = gaussian_problem(dim)
         prior_sampler, lnL, lnZ_true = problem
+        logger.info(f"Problem setup - dim={dim}, true_lnZ={lnZ_true:.4f}")
 
         for n_live in n_live_list:
+            logger.info(f"Running experiments with n_live={n_live}")
             for rep in range(n_repeats):
+                current_exp += 1
+                logger.info(f"Experiment {current_exp}/{total_experiments}: dim={dim}, n_live={n_live}, rep={rep+1}")
+                
                 seed = 10 * dim + 100 * n_live + rep
                 # Classical
+                logger.info("Running classical nested sampling...")
                 lnZc, n_like_c, t_c = classical_nested_sampling(
                     prior_sampler, lnL, n_live=n_live, rng_seed=seed
                 )
@@ -345,8 +396,10 @@ def run_suite(
                     seed=seed,
                 )
                 _write_result(res_c)
+                logger.info(f"Classical result: lnZ_error={abs(lnZc - lnZ_true):.4f}")
 
                 if _HAS_QISKIT:
+                    logger.info("Running quantum nested sampling...")
                     lnZq, n_like_q, n_oracle_q, t_q = quantum_nested_sampling(
                         prior_sampler,
                         lnL,
@@ -365,8 +418,11 @@ def run_suite(
                         seed=seed,
                     )
                     _write_result(res_q)
+                    logger.info(f"Quantum result: lnZ_error={abs(lnZq - lnZ_true):.4f}")
                 else:
-                    print("[WARN] Qiskit not available — quantum run skipped.")
+                    logger.warning("Qiskit not available — quantum run skipped.")
+    
+    logger.info("Benchmark suite completed!")
 
 
 _RESULTS_FILE = RESULTS_DIR / "benchmark_results.csv"
