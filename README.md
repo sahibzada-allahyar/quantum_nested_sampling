@@ -1,3 +1,5 @@
+Personal website: [Sahibzada Allahyar](https://sahibzada-allahyar.github.io)
+
 # Quantum Nested Sampling — Publication‑grade Benchmark Suite
 
 This repository contains a complete implementation of Quantum Nested Sampling (QNS) compared with Classical Nested Sampling (CNS) for Bayesian evidence computation.
